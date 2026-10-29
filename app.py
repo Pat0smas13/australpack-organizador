@@ -17,7 +17,6 @@ def init_db():
     conn = sqlite3.connect("organizador_australpack.db")
     c = conn.cursor()
     
-    # Tabla 1: Bitácora de Lotes, Calidad y Notas de Turno
     c.execute('''
         CREATE TABLE IF NOT EXISTS bitacora_lotes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +35,6 @@ def init_db():
         )
     ''')
     
-    # Tabla 2: Organizador de Tareas y Ventanas de Mantenimiento
     c.execute('''
         CREATE TABLE IF NOT EXISTS tareas_planta (
             id_tarea INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +49,6 @@ def init_db():
         )
     ''')
     
-    # Datos iniciales del caso para que la app ya tenga historia al abrir el link
     c.execute("SELECT COUNT(*) FROM bitacora_lotes")
     if c.fetchone()[0] == 0:
         lotes_semilla = [
@@ -80,14 +77,9 @@ def init_db():
 init_db()
 
 # ==============================================================================
-# 2. REGLA DE DECISIÓN EXPLÍCITA Y MANEJO DE ERRORES (Exigencia Sección 9)
+# 2. REGLA DE DECISIÓN EXPLÍCITA Y MANEJO DE ERRORES
 # ==============================================================================
 def evaluar_lote(humedad, min_detencion, codigo_lote):
-    """
-    Evalúa los datos ingresados, detecta errores o valores fuera de rango
-    y clasifica qué exige detener vs qué permite observar.
-    """
-    # 1. Manejo de error o dato faltante / fuera de rango
     if not codigo_lote.strip():
         return "⚠️ ERROR: LOTE VACÍO", "Falta identificar el código de lote/pallet. No se puede registrar sin trazabilidad.", "error"
     if humedad <= 0 or humedad > 35 or min_detencion < 0 or min_detencion > 480:
@@ -97,7 +89,6 @@ def evaluar_lote(humedad, min_detencion, codigo_lote):
             "error"
         )
     
-    # 2. Regla de 3 niveles (Respuesta al turno nocturno y calidad)
     if humedad > 10.0 or min_detencion >= 30:
         return (
             "🔴 ROJO (Detener e Intervenir)",
@@ -123,11 +114,11 @@ def evaluar_lote(humedad, min_detencion, codigo_lote):
 st.title("📋 Austral Pack Circular SpA — Organizador y Bitácora de Trazabilidad")
 st.markdown("Sistema centralizado para eliminar planillas aisladas, organizar tareas de mantenimiento y responder auditorías en segundos.")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+# Pestañas enfocadas estrictamente en la operación de planta (Se eliminó KPIs financieros)
+tab1, tab2, tab3 = st.tabs([
     "📝 1. Anotar Lote y Turno",
     "🛠️ 2. Organizador de Tareas y Mantenimiento",
-    "🔍 3. Buscador de Auditoría (Frutos del Sur)",
-    "📊 4. Evaluación Financiera y KPIs"
+    "🔍 3. Buscador de Auditoría (Frutos del Sur)"
 ])
 
 # ------------------------------------------------------------------------------
@@ -135,7 +126,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # ------------------------------------------------------------------------------
 with tab1:
     st.subheader("Bitácora Digital de Producción, Calidad y Turno")
-    st.info("💡 **Qué resuelve:** Reemplaza en un solo formulario la planilla de calidad, el registro de paradas y los mensajes sueltos del turno.")
+    st.info("💡 **Uso operativo:** Reemplaza en un solo formulario la planilla de calidad, el registro de paradas y los mensajes sueltos del turno.")
     
     col_a, col_b = st.columns(2)
     
@@ -184,7 +175,7 @@ with tab1:
             "Excepción de Formato / Ruido Normal de Planta (Falso Positivo)",
             "Registro en Contingencia Manual (Falla de Instrumento)"
         ])
-        crear_tarea_auto = st.checkbox("📌 Crear automáticamente tarea pendiente para Mantenimiento/Calidad", value=(color in ["rojo", "amarillo"]))
+        crear_tarea_auto = st.checkbox("📌 Crear automáticamente tarea pendiente para Mantenimiento", value=(color in ["rojo", "amarillo"]))
     with c2:
         nota_bitacora = st.text_area(
             "Anotación detallada del turno (Qué ocurrió y qué se hizo):",
@@ -221,7 +212,7 @@ with tab1:
 # ------------------------------------------------------------------------------
 with tab2:
     st.subheader("🛠️ Organizador de Intervenciones, Repuestos y Pendientes")
-    st.markdown("Responde a la exigencia de **Óscar Leiva (Mantenimiento)**: validar la señal, confirmar repuestos y programar una ventana de intervención.")
+    st.markdown("Herramienta para validar señales, confirmar repuestos y programar ventanas de intervención sin detener operaciones de forma imprevista.")
     
     with st.expander("➕ Agregar Nueva Tarea o Ventana de Mantenimiento Manualmente"):
         with st.form("nueva_tarea_form"):
@@ -264,8 +255,8 @@ with tab2:
 # PESTAÑA 3: BUSCADOR DE AUDITORÍA (< 5 SEGUNDOS)
 # ------------------------------------------------------------------------------
 with tab3:
-    st.subheader("🔍 Trazabilidad Instantánea para Auditoría (Frutos del Sur Export)")
-    st.markdown("Permite reconstruir **qué ocurrió, quién lo revisó y qué se hizo ante una desviación** en segundos en lugar de 3 horas.")
+    st.subheader("🔍 Trazabilidad Instantánea para Auditoría")
+    st.markdown("Historial continuo para reconstruir secuencias de eventos y validaciones en segundos.")
     
     conn = sqlite3.connect("organizador_australpack.db")
     df_lotes = pd.read_sql_query("SELECT * FROM bitacora_lotes ORDER BY id DESC", conn)
@@ -290,24 +281,8 @@ with tab3:
     
     csv_auditoria = df_resultado.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="📥 Descargar Historial Verificable del Lote (CSV para Auditoría)",
+        label="📥 Descargar Historial Verificable del Lote (CSV)",
         data=csv_auditoria,
         file_name="Historial_Trazabilidad_AustralPack.csv",
         mime="text/csv"
     )
-
-# ------------------------------------------------------------------------------
-# PESTAÑA 4: RESUMEN EJECUTIVO Y VIABILIDAD (Alternativas A + C)
-# ------------------------------------------------------------------------------
-with tab4:
-    st.subheader("📊 Justificación de la Decisión: Combinación A + C")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Costo Año 1 (A + C)", "$33,2 MM", "Bajo el tope de $48 MM")
-    c2.metric("Presupuesto Capacitación/Adopción", "$14,8 MM disponibles", "Financia ambos turnos")
-    c3.metric("Disponibilidad Troqueladora", "80% ➔ 88%", "+8 pp (Alternativa A)")
-    c4.metric("Trazabilidad y OTIF", "96% Trazab. / 94% OTIF", "+5 pp OTIF (Alternativa C)")
-    
-    st.markdown("""
-    * **Cumplimiento de Restricciones:** Plazo de implementación $\le 12\text{ semanas}$, detención $\le 4\text{ días consecutivos}$ y **cero desvinculaciones** por automatización.
-    * **Contingencia Manual:** Si un sensor falla o entrega un valor corrupto, el organizador bloquea alertas falsas y habilita el ingreso manual validado por Calidad.
-    """)
