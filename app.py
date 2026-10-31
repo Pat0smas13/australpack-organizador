@@ -16,7 +16,6 @@ st.set_page_config(
 # ==============================================================================
 st.markdown("""
 <style>
-    /* Encabezado principal estilo consola industrial */
     .main-header {
         background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 100%);
         padding: 1.5rem 2rem;
@@ -37,7 +36,6 @@ st.markdown("""
         margin: 0.3rem 0 0 0;
         font-size: 0.95rem;
     }
-    /* Tarjetas de semáforo operacionales */
     .semaforo-box {
         padding: 1.1rem;
         border-radius: 10px;
@@ -50,7 +48,6 @@ st.markdown("""
     .sem-rojo { background-color: #fee2e2; color: #991b1b; border-left: 6px solid #ef4444; }
     .sem-error { background-color: #f3e8ff; color: #6b21a8; border-left: 6px solid #a855f7; }
     
-    /* Ficha de certificado de lote */
     .pasaporte-lote {
         background-color: #f8fafc;
         border: 1px solid #e2e8f0;
@@ -63,7 +60,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 1. BASE DE DATOS EN PYTHON (Mantiene compatibilidad y amplía datos de prueba)
+# 1. BASE DE DATOS EN PYTHON (Multicliente y Multiturno)
 # ==============================================================================
 def init_db(force_reset=False):
     conn = sqlite3.connect("organizador_australpack.db")
@@ -189,7 +186,7 @@ with st.sidebar:
     
     if st.button("🔄 Restaurar Datos de Demostración", use_container_width=True):
         init_db(force_reset=True)
-        st.toast("Base de datos restaurada con los lotes originales del caso.", icon="✅")
+        st.toast("Base de datos restaurada con lotes multimarca.", icon="✅")
         st.rerun()
 
 # ==============================================================================
@@ -198,11 +195,10 @@ with st.sidebar:
 st.markdown("""
 <div class="main-header">
     <h1>🏭 Austral Pack Circular SpA — Terminal de Trazabilidad y Planta</h1>
-    <p>Bitácora unificada de Calidad, Producción y Mantenimiento | Control continuo por Lote y Turno</p>
+    <p>Bitácora unificada de Calidad, Producción y Mantenimiento | Control continuo por Lote, Línea y Turno</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Lectura rápida para métricas operativas superiores (Útiles para el trabajador/supervisor)
 conn = sqlite3.connect("organizador_australpack.db")
 df_metricas_lotes = pd.read_sql_query("SELECT * FROM bitacora_lotes", conn)
 df_metricas_tareas = pd.read_sql_query("SELECT * FROM tareas_planta", conn)
@@ -223,18 +219,18 @@ with m2:
         st.metric("💧 Humedad Promedio Cartón", f"{humedad_prom:.1f} %", delta_h, delta_color="normal" if humedad_prom <= 8.0 else "inverse")
 with m3:
     with st.container(border=True):
-        st.metric("⏱️ Tiempo Acumulado Detención", f"{min_totales_paro} min", "Monitoreo Troqueladora-01", delta_color="off")
+        st.metric("⏱️ Tiempo Acumulado Detención", f"{min_totales_paro} min", "Monitoreo de líneas activas", delta_color="off")
 with m4:
     with st.container(border=True):
         st.metric("🛠️ Órdenes Mantenimiento Activas", f"{tareas_pend} pendientes", "Con control de repuestos", delta_color="inverse" if tareas_pend > 2 else "normal")
 
 # ==============================================================================
-# 5. PESTAÑAS OPERATIVAS DE LA PLANTA
+# 5. PESTAÑAS OPERATIVAS GENERALES DE PLANTA
 # ==============================================================================
 tab1, tab2, tab3 = st.tabs([
     "📝 1. Anotar Lote y Turno (Operación)",
     "📊 2. Mantenimiento y Gráficos de Planta",
-    "🔍 3. Buscador de Auditoría (Frutos del Sur)"
+    "🔍 3. Historial y Auditoría de Lotes"
 ])
 
 # ------------------------------------------------------------------------------
@@ -246,11 +242,17 @@ with tab1:
     with col_a:
         with st.container(border=True):
             st.markdown("#### 📦 1. Identificación del Lote y Turno")
-            st.caption("Unifica el código QR del pallet con el equipo y el turno responsable.")
+            st.caption("Unifica el código QR del pallet con el cliente, el equipo y el turno responsable.")
             
             c_in1, c_in2 = st.columns(2)
-            id_lote = c_in1.text_input("Código de Lote / QR Pallet", value="LOTE-FS-482")
-            cliente = c_in2.selectbox("Cliente Destino", ["Frutos del Sur Export", "AgroSur Export", "Viña Austral", "Mercado Interno"])
+            id_lote = c_in1.text_input("Código de Lote / QR Pallet", value="LOTE-AP-501")
+            cliente = c_in2.selectbox("Cliente Destino", [
+                "Frutos del Sur Export",
+                "AgroSur Export",
+                "Viña Austral",
+                "Salmones del Pacífico",
+                "Mercado Interno General"
+            ])
             
             c_in3, c_in4 = st.columns(2)
             maquina = c_in3.selectbox("Equipo / Línea", ["Troqueladora-01 (Crítica)", "Corrugadora-01", "Pegadora-02", "Bodega Frío"])
@@ -266,7 +268,7 @@ with tab1:
     with col_b:
         with st.container(border=True):
             st.markdown("#### 📡 2. Parámetros del Proceso y Diagnóstico")
-            modo_prueba_error = st.toggle("🧪 Simular Falla de Sensor / Dato Fuera de Rango (Prueba de Rúbrica)")
+            modo_prueba_error = st.toggle("🧪 Simular Falla de Sensor / Dato Fuera de Rango (Prueba de Contingencia)")
             
             p1, p2 = st.columns(2)
             if modo_prueba_error:
@@ -368,7 +370,7 @@ with tab2:
                 st.info("Sin datos para graficar.")
 
     st.divider()
-    st.markdown("#### 🛠️ Gestión de Órdenes de Mantenimiento y Stock de Repuestos (Óscar Leiva)")
+    st.markdown("#### 🛠️ Gestión de Órdenes de Mantenimiento y Stock de Repuestos")
     
     col_gest1, col_gest2 = st.columns([1, 1])
     
@@ -376,7 +378,7 @@ with tab2:
         with st.expander("➕ Crear Nueva Orden de Mantenimiento Manual", expanded=False):
             with st.form("nueva_tarea_form"):
                 f1, f2 = st.columns(2)
-                lote_t = f1.text_input("Lote Asociado", value="LOTE-FS-482")
+                lote_t = f1.text_input("Lote Asociado", value="LOTE-AP-501")
                 maq_t = f2.selectbox("Equipo", ["Troqueladora-01 (Crítica)", "Corrugadora-01", "Sistema Sensores / QR"])
                 
                 f3, f4 = st.columns(2)
@@ -444,14 +446,14 @@ with tab2:
     )
 
 # ------------------------------------------------------------------------------
-# PESTAÑA 3: BUSCADOR DE AUDITORÍA (< 5 SEGUNDOS) Y CERTIFICADO VISUAL
+# PESTAÑA 3: BUSCADOR GENERAL DE TRAZABILIDAD Y AUDITORÍA (< 5 SEGUNDOS)
 # ------------------------------------------------------------------------------
 with tab3:
-    st.markdown("#### 🔍 Consulta Instantánea para Auditoría de Clientes (Frutos del Sur Export)")
-    st.caption("Reconstruye la historia verificable del lote en menos de 5 segundos: qué ocurrió, quién revisó y cómo se actuó.")
+    st.markdown("#### 🔍 Consulta Instantánea de Trazabilidad y Auditoría de Lotes")
+    st.caption("Reconstruye la historia verificable de cualquier lote y cliente en menos de 5 segundos: qué ocurrió, quién revisó y cómo se actuó.")
     
     c_busq1, c_busq2 = st.columns([2, 1])
-    texto_buscar = c_busq1.text_input("🔎 Buscar por Código de Lote, Cliente o Responsable (Ej: LOTE-FS-480):", "")
+    texto_buscar = c_busq1.text_input("🔎 Buscar por Código de Lote, Cliente, Máquina o Responsable (Ej: LOTE-FS-480, AgroSur, Viña Austral):", "")
     filtro_alerta = c_busq2.selectbox("Filtrar por Nivel de Alerta:", ["Todos", "🟢 VERDE", "🟡 AMARILLO", "🔴 ROJO", "⚠️ ERROR"])
     
     df_resultado = df_metricas_lotes.copy().sort_values(by="id", ascending=False)
@@ -459,13 +461,13 @@ with tab3:
         df_resultado = df_resultado[
             df_resultado["id_lote"].str.contains(texto_buscar, case=False, na=False) |
             df_resultado["cliente"].str.contains(texto_buscar, case=False, na=False) |
+            df_resultado["maquina"].str.contains(texto_buscar, case=False, na=False) |
             df_resultado["responsable"].str.contains(texto_buscar, case=False, na=False) |
             df_resultado["nota_bitacora"].str.contains(texto_buscar, case=False, na=False)
         ]
     if filtro_alerta != "Todos":
         df_resultado = df_resultado[df_resultado["estado_regla"].str.contains(filtro_alerta[:5], case=False, na=False)]
 
-    # Ficha visual de Pasaporte del Lote para el primer resultado encontrado
     if not df_resultado.empty:
         registro_destacado = df_resultado.iloc[0]
         st.markdown(f"""
@@ -478,7 +480,7 @@ with tab3:
             </div>
             <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; font-size:0.92rem; margin-bottom:10px;">
                 <div><b>Cliente:</b><br>{registro_destacado['cliente']}</div>
-                <div><b>Equipo Crítico:</b><br>{registro_destacado['maquina']}</div>
+                <div><b>Equipo / Línea:</b><br>{registro_destacado['maquina']}</div>
                 <div><b>Parámetros Medidos:</b><br>Humedad: {registro_destacado['humedad_pct']}% | Parada: {registro_destacado['minutos_detencion']} min</div>
                 <div><b>Responsable en Piso:</b><br>{registro_destacado['responsable']}</div>
             </div>
@@ -513,7 +515,7 @@ with tab3:
     
     csv_auditoria = df_resultado.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="📥 Descargar Certificado Oficial del Lote (CSV / Excel para Auditoría)",
+        label="📥 Descargar Certificado Oficial de Trazabilidad (CSV / Excel)",
         data=csv_auditoria,
         file_name="Historial_Trazabilidad_AustralPack.csv",
         mime="text/csv",
