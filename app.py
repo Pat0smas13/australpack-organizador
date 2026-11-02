@@ -1,20 +1,121 @@
-import streamlit as st
+import re
 import sqlite3
-import pandas as pd
+import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-# Configuración general de la Web App
+import pandas as pd
+import streamlit as st
+
+# ==============================================================================
+# CONFIGURACIÓN GENERAL
+# ==============================================================================
+DB_PATH = "australpack_v2.db"
+ZONA_PLANTA = ZoneInfo("America/Santiago")
+
+# Supuestos de demostración, por validar con Calidad y Mantenimiento.
+HUMEDAD_VALIDA = (3.0, 35.0)
+MINUTOS_VALIDOS = (0, 480)
+HUMEDAD_AMARILLO = 8.0
+HUMEDAD_ROJO = 10.0
+MINUTOS_REVISION = 30
+LECTURAS_CONFIRMACION = 3
+LIMITES_MAQUINA = {
+    "vibracion": (4.5, 7.0),
+    "temperatura": (70.0, 85.0),
+    "corriente": (32.0, 40.0),
+}
+
+ORDEN_NIVEL = {"verde": 0, "amarillo": 1, "rojo": 2}
+ETIQUETAS = {
+    "verde": "🟢 VERDE (Normal)",
+    "amarillo": "🟡 AMARILLO (Observar)",
+    "rojo": "🔴 ROJO (Intervenir)",
+}
+
+VALIDACION_OK = "Parámetro Validado OK"
+VALIDACION_FALLA = "Falla Real Confirmada (Requiere Intervención)"
+VALIDACION_DESVIACION = "Desviación Real en Observación"
+VALIDACION_RUIDO = "Excepción de Formato / Ruido Normal de Planta (Falso Positivo)"
+VALIDACION_MANUAL = "Registro en Contingencia Manual (Falla de Instrumento)"
+VALIDACIONES = [
+    VALIDACION_OK,
+    VALIDACION_FALLA,
+    VALIDACION_DESVIACION,
+    VALIDACION_RUIDO,
+    VALIDACION_MANUAL,
+]
+
+PRIORIDAD_ALTA = "Alta (Intervención Prioritaria)"
+PRIORIDAD_MEDIA = "Media (Ventana Programada)"
+PRIORIDAD_BAJA = "Baja (Inspección Rutinaria)"
+
+CLIENTES = [
+    "Frutos del Sur Export",
+    "AgroSur Export",
+    "Viña Austral",
+    "Salmones del Pacífico",
+    "Mercado Interno General",
+]
+EQUIPOS = ["Troqueladora-01 (Crítica)", "Corrugadora-01", "Pegadora-02"]
+EQUIPO_SENSORES = "Sistema Sensores / QR"
+PERSONAS = [
+    "Paula Jara (Operadora de Turno)",
+    "Camila Figueroa (Jefa de Calidad)",
+    "Óscar Leiva (Mantenimiento)",
+    "Martín Reyes (Jefe de Producción)",
+]
+CAUSAS = [
+    "Sin detención",
+    "Cambio de formato",
+    "Falla mecánica",
+    "Falta de material",
+    "Espera de información",
+    "Otra",
+]
+ESTADOS_BLOQUEADOS = ("Retenido", "Reprocesar", "Descartar")
+ESTADOS_ORDEN = ["Pendiente", "En Proceso", "Completada"]
+OPCIONES_REPUESTO = [
+    "Por verificar",
+    "Sí (En bodega)",
+    "No (Solicitar compra)",
+    "No requiere repuesto",
+]
+PATRON_LOTE = re.compile(r"[A-Z0-9-]{6,30}")
+
+COLUMNAS_SEMILLA = (
+    "fecha_hora",
+    "id_lote",
+    "cliente",
+    "maquina",
+    "turno",
+    "responsable",
+    "humedad_pct",
+    "minutos_detencion",
+    "causa_detencion",
+    "vibracion",
+    "temperatura",
+    "corriente",
+    "lecturas_seguidas",
+    "estado_regla",
+    "decision_operativa",
+    "validacion_turno",
+    "nota_bitacora",
+    "estado_lote",
+)
+
 st.set_page_config(
-    page_title="Austral Pack | Terminal Operativo de Planta",
+    page_title="AustralPack | Terminal Operativo de Planta",
     page_icon="🏭",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # ==============================================================================
-# ESTILOS CSS PERSONALIZADOS (Aspecto Industrial Moderno)
+# ESTILOS
 # ==============================================================================
-st.markdown("""
+st.markdown(
+    """
 <style>
     .main-header {
         background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 100%);
@@ -43,34 +144,129 @@ st.markdown("""
         margin-top: 0.8rem;
         margin-bottom: 0.8rem;
     }
-    .sem-verde { background-color: #dcfce7; color: #166534; border-left: 6px solid #22c55e; }
-    .sem-amarillo { background-color: #fef9c3; color: #854d0e; border-left: 6px solid #eab308; }
-    .sem-rojo { background-color: #fee2e2; color: #991b1b; border-left: 6px solid #ef4444; }
-    .sem-error { background-color: #f3e8ff; color: #6b21a8; border-left: 6px solid #a855f7; }
-    
-    .pasaporte-lote {
-        background-color: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-top: 4px solid #0284c7;
-        border-radius: 10px;
-        padding: 1.2rem;
-        margin-bottom: 1rem;
+    .sem-verde {
+        background-color: #dcfce7;
+        color: #166534;
+        border-left: 6px solid #22c55e;
+    }
+    .sem-amarillo {
+        background-color: #fef9c3;
+        color: #854d0e;
+        border-left: 6px solid #eab308;
+    }
+    .sem-rojo {
+        background-color: #fee2e2;
+        color: #991b1b;
+        border-left: 6px solid #ef4444;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
+
 
 # ==============================================================================
-# 1. BASE DE DATOS EN PYTHON (Multicliente y Multiturno)
+# 1. FUNCIONES DE BASE DE DATOS
 # ==============================================================================
-def init_db(force_reset=False):
-    conn = sqlite3.connect("organizador_australpack.db")
+def ahora_planta():
+    return datetime.now(ZONA_PLANTA).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def conectar():
+    return sqlite3.connect(DB_PATH)
+
+
+def insertar_registro(cursor, registro):
+    columnas = ", ".join(registro)
+    marcadores = ", ".join("?" for _ in registro)
+    cursor.execute(
+        f"INSERT INTO bitacora_lotes ({columnas}) VALUES ({marcadores})",
+        tuple(registro.values()),
+    )
+
+
+def registrar_evento(cursor, id_lote, evento, detalle, responsable, estado=None):
+    cursor.execute(
+        """
+        INSERT INTO eventos_lote
+        (fecha_hora, id_lote, evento, detalle, responsable, estado_nuevo)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (ahora_planta(), id_lote, evento, detalle, responsable, estado),
+    )
+
+
+def crear_orden(
+    cursor,
+    id_lote,
+    maquina,
+    prioridad,
+    asignado_a,
+    repuesto,
+    estado,
+    descripcion,
+    registrado_por,
+):
+    cursor.execute(
+        """
+        INSERT INTO tareas_planta
+        (fecha_creacion, id_lote_asociado, maquina, prioridad, asignado_a,
+         repuesto_disponible, estado_tarea, descripcion_accion)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ahora_planta(),
+            id_lote,
+            maquina,
+            prioridad,
+            asignado_a,
+            repuesto,
+            estado,
+            descripcion,
+        ),
+    )
+    registrar_evento(
+        cursor,
+        id_lote,
+        f"Orden #{cursor.lastrowid} creada",
+        f"{prioridad}: {descripcion}",
+        registrado_por,
+    )
+
+
+def estado_actual(conn, id_lote):
+    fila = conn.execute(
+        """
+        SELECT estado_nuevo
+        FROM eventos_lote
+        WHERE id_lote = ? AND estado_nuevo IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (id_lote,),
+    ).fetchone()
+    if fila:
+        return fila[0]
+
+    fila = conn.execute(
+        """
+        SELECT estado_lote
+        FROM bitacora_lotes
+        WHERE id_lote = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (id_lote,),
+    ).fetchone()
+    return fila[0] if fila else None
+
+
+def init_db():
+    conn = conectar()
     c = conn.cursor()
-    
-    if force_reset:
-        c.execute("DROP TABLE IF EXISTS bitacora_lotes")
-        c.execute("DROP TABLE IF EXISTS tareas_planta")
-    
-    c.execute('''
+
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS bitacora_lotes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             fecha_hora TEXT,
@@ -81,14 +277,25 @@ def init_db(force_reset=False):
             responsable TEXT,
             humedad_pct REAL,
             minutos_detencion INTEGER,
+            lectura_humedad_cruda REAL,
+            lectura_minutos_cruda INTEGER,
+            origen_dato TEXT,
+            causa_detencion TEXT,
+            vibracion REAL,
+            temperatura REAL,
+            corriente REAL,
+            lecturas_seguidas INTEGER,
             estado_regla TEXT,
             decision_operativa TEXT,
             validacion_turno TEXT,
-            nota_bitacora TEXT
+            nota_bitacora TEXT,
+            estado_lote TEXT
         )
-    ''')
-    
-    c.execute('''
+        """
+    )
+
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS tareas_planta (
             id_tarea INTEGER PRIMARY KEY AUTOINCREMENT,
             fecha_creacion TEXT,
@@ -100,107 +307,362 @@ def init_db(force_reset=False):
             estado_tarea TEXT,
             descripcion_accion TEXT
         )
-    ''')
-    
+        """
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS eventos_lote (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha_hora TEXT NOT NULL,
+            id_lote TEXT NOT NULL,
+            evento TEXT NOT NULL,
+            detalle TEXT NOT NULL,
+            responsable TEXT NOT NULL,
+            estado_nuevo TEXT
+        )
+        """
+    )
+
     c.execute("SELECT COUNT(*) FROM bitacora_lotes")
     if c.fetchone()[0] == 0:
+        decision_verde = "Lote apto para continuar a despacho. Máquina dentro de rango."
+        decision_amarilla = (
+            "Seguir produciendo. Calidad revisa el lote antes del despacho. "
+            "Máquina dentro de rango."
+        )
+        decision_roja = (
+            "Retener el lote y avisar a Calidad. Señal crítica confirmada. "
+            "Validar en terreno y aplicar protocolo seguro."
+        )
+
         lotes_semilla = [
-            ("2026-10-27 22:15", "LOTE-FS-479", "Frutos del Sur Export", "Troqueladora-01 (Crítica)", "Noche", "Paula Jara (Operadora de Turno)", 7.1, 5, "🟢 VERDE (Normal)", "OK: Parámetros dentro de estándar. Lote autorizado.", "Parámetro Validado OK", "Operación fluida en primera mitad del turno nocturno."),
-            ("2026-10-28 07:46", "LOTE-FS-480", "Frutos del Sur Export", "Troqueladora-01 (Crítica)", "Noche", "Paula Jara (Operadora de Turno)", 9.4, 20, "🟡 AMARILLO (Observar)", "Observar sin detener línea; revisar al cierre de formato.", "Excepción de Formato / Ruido Normal de Planta (Falso Positivo)", "Cartón con leve humedad por condensación nocturna. Se priorizó continuidad del despacho."),
-            ("2026-10-28 15:10", "LOTE-FS-481", "Frutos del Sur Export", "Troqueladora-01 (Crítica)", "Día", "Camila Figueroa (Jefa de Calidad)", 6.8, 0, "🟢 VERDE (Normal)", "Lote liberado a despacho frigorífico.", "Parámetro Validado OK", "Control de calidad normal, sin deformación en prueba de frío."),
-            ("2026-10-29 03:20", "LOTE-AP-109", "AgroSur Export", "Troqueladora-01 (Crítica)", "Noche", "Óscar Leiva (Mantenimiento)", 11.5, 45, "🔴 ROJO (Detener)", "Detener troqueladora y abrir orden de mantenimiento.", "Falla Real Confirmada (Requiere Intervención)", "Desajuste en troquel y exceso de humedad. Se detuvo línea y se reemplazó pieza."),
-            ("2026-10-29 11:30", "LOTE-VA-204", "Viña Austral", "Corrugadora-01", "Día", "Martín Reyes (Jefe de Producción)", 8.5, 15, "🟡 AMARILLO (Observar)", "Desviación moderada. Revisar tensión al cambio de turno.", "Excepción de Formato / Ruido Normal de Planta (Falso Positivo)", "Ajuste menor por cambio de gramaje en caja de exportación.")
+            (
+                "2026-10-27 22:15:00",
+                "LOTE-FS-479",
+                "Frutos del Sur Export",
+                "Troqueladora-01 (Crítica)",
+                "Noche",
+                "Paula Jara (Operadora de Turno)",
+                7.1,
+                5,
+                "Cambio de formato",
+                2.1,
+                56.0,
+                27.0,
+                0,
+                ETIQUETAS["verde"],
+                decision_verde,
+                VALIDACION_OK,
+                "Operación fluida en primera mitad del turno nocturno.",
+                "Liberado",
+            ),
+            (
+                "2026-10-28 07:46:00",
+                "LOTE-FS-480",
+                "Frutos del Sur Export",
+                "Troqueladora-01 (Crítica)",
+                "Noche",
+                "Paula Jara (Operadora de Turno)",
+                9.4,
+                20,
+                "Espera de información",
+                2.8,
+                60.0,
+                29.0,
+                0,
+                ETIQUETAS["amarillo"],
+                decision_amarilla,
+                VALIDACION_DESVIACION,
+                "Humedad sobre el límite de precaución. Se solicitó revisión de Calidad.",
+                "En observación",
+            ),
+            (
+                "2026-10-28 15:10:00",
+                "LOTE-FS-481",
+                "Frutos del Sur Export",
+                "Troqueladora-01 (Crítica)",
+                "Día",
+                "Camila Figueroa (Jefa de Calidad)",
+                6.8,
+                0,
+                "Sin detención",
+                2.0,
+                54.0,
+                27.0,
+                0,
+                ETIQUETAS["verde"],
+                decision_verde,
+                VALIDACION_OK,
+                "Control de calidad normal, sin deformación en prueba de frío.",
+                "Liberado",
+            ),
+            (
+                "2026-10-29 03:20:00",
+                "LOTE-AP-109",
+                "AgroSur Export",
+                "Troqueladora-01 (Crítica)",
+                "Noche",
+                "Óscar Leiva (Mantenimiento)",
+                11.5,
+                45,
+                "Falla mecánica",
+                7.6,
+                72.0,
+                36.0,
+                4,
+                ETIQUETAS["rojo"],
+                decision_roja,
+                VALIDACION_FALLA,
+                "Desajuste en troquel y exceso de humedad. Mantenimiento reemplazó la pieza.",
+                "Retenido",
+            ),
+            (
+                "2026-10-29 11:30:00",
+                "LOTE-VA-204",
+                "Viña Austral",
+                "Corrugadora-01",
+                "Día",
+                "Martín Reyes (Jefe de Producción)",
+                8.5,
+                15,
+                "Cambio de formato",
+                3.0,
+                58.0,
+                28.0,
+                1,
+                ETIQUETAS["amarillo"],
+                decision_amarilla,
+                VALIDACION_RUIDO,
+                "Ajuste menor por cambio de gramaje en caja de exportación.",
+                "En observación",
+            ),
         ]
-        c.executemany('''
-            INSERT INTO bitacora_lotes 
-            (fecha_hora, id_lote, cliente, maquina, turno, responsable, humedad_pct, minutos_detencion, estado_regla, decision_operativa, validacion_turno, nota_bitacora)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', lotes_semilla)
-        
+
+        for fila in lotes_semilla:
+            registro = dict(zip(COLUMNAS_SEMILLA, fila))
+            registro["lectura_humedad_cruda"] = registro["humedad_pct"]
+            registro["lectura_minutos_cruda"] = registro["minutos_detencion"]
+            registro["origen_dato"] = "Sensor (dato de demostración)"
+            insertar_registro(c, registro)
+
         tareas_semilla = [
-            ("2026-10-28 08:00", "LOTE-FS-480", "Troqueladora-01 (Crítica)", "Media (Ventana Programada)", "Óscar Leiva (Mantenimiento)", "Sí (En bodega)", "En Proceso", "Calibrar sensor de humedad y revisar cuchillas en cambio de turno sin frenar planta."),
-            ("2026-10-29 03:25", "LOTE-AP-109", "Troqueladora-01 (Crítica)", "Alta (Detención Inmediata)", "Óscar Leiva (Mantenimiento)", "Sí (En bodega)", "Completada", "Cambio de sello mecánico y validación manual junto a Calidad."),
-            ("2026-10-29 11:40", "LOTE-VA-204", "Corrugadora-01", "Media (Ventana Programada)", "Óscar Leiva (Mantenimiento)", "Sí (En bodega)", "Pendiente", "Inspeccionar rodillos al finalizar corrida de Viña Austral.")
+            (
+                "2026-10-28 08:00:00",
+                "LOTE-FS-480",
+                "Troqueladora-01 (Crítica)",
+                PRIORIDAD_MEDIA,
+                "Óscar Leiva (Mantenimiento)",
+                "Sí (En bodega)",
+                "En Proceso",
+                "Revisar cuchillas en cambio de turno sin frenar la planta.",
+            ),
+            (
+                "2026-10-29 03:25:00",
+                "LOTE-AP-109",
+                "Troqueladora-01 (Crítica)",
+                PRIORIDAD_ALTA,
+                "Óscar Leiva (Mantenimiento)",
+                "Sí (En bodega)",
+                "Completada",
+                "Cambio de sello mecánico y validación junto a Calidad.",
+            ),
+            (
+                "2026-10-29 11:40:00",
+                "LOTE-VA-204",
+                "Corrugadora-01",
+                PRIORIDAD_MEDIA,
+                "Óscar Leiva (Mantenimiento)",
+                "Sí (En bodega)",
+                "Pendiente",
+                "Inspeccionar rodillos al finalizar corrida de Viña Austral.",
+            ),
         ]
-        c.executemany('''
+        c.executemany(
+            """
             INSERT INTO tareas_planta
-            (fecha_creacion, id_lote_asociado, maquina, prioridad, asignado_a, repuesto_disponible, estado_tarea, descripcion_accion)
+            (fecha_creacion, id_lote_asociado, maquina, prioridad, asignado_a,
+             repuesto_disponible, estado_tarea, descripcion_accion)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', tareas_semilla)
-        conn.commit()
+            """,
+            tareas_semilla,
+        )
+
+        c.execute(
+            """
+            INSERT INTO eventos_lote
+            (fecha_hora, id_lote, evento, detalle, responsable, estado_nuevo)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-10-28 09:10:00",
+                "LOTE-FS-480",
+                "Decisión de Calidad",
+                "Nueva medición y revisión de muestra antes del despacho.",
+                "Camila Figueroa (Jefa de Calidad)",
+                "Liberado",
+            ),
+        )
+
+    for tabla in ("bitacora_lotes", "eventos_lote"):
+        for accion in ("UPDATE", "DELETE"):
+            c.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS bloquear_{accion.lower()}_{tabla}
+                BEFORE {accion} ON {tabla}
+                BEGIN
+                    SELECT RAISE(ABORT, 'Registro protegido: agrega un evento nuevo.');
+                END
+                """
+            )
+
+    conn.commit()
     conn.close()
+
 
 init_db()
 
-# ==============================================================================
-# 2. REGLA DE DECISIÓN EXPLÍCITA Y MANEJO DE ERRORES
-# ==============================================================================
-def evaluar_lote(humedad, min_detencion, codigo_lote):
-    if not codigo_lote.strip():
-        return "⚠️ ERROR: LOTE VACÍO", "Falta identificar el código de lote/pallet. No se puede registrar sin trazabilidad.", "error"
-    if humedad <= 0 or humedad > 35 or min_detencion < 0 or min_detencion > 480:
-        return (
-            "⚠️ ERROR: DATO FUERA DE RANGO (Contingencia Manual)",
-            "Valor físicamente inválido o error de lectura del sensor. Se bloquea alerta automática y se exige validación manual de Calidad con higrómetro de respaldo.",
-            "error"
-        )
-    
-    if humedad > 10.0 or min_detencion >= 30:
-        return (
-            "🔴 ROJO (Detener e Intervenir)",
-            "CRÍTICO: Alto riesgo de deformación en frío (>10% humedad) o parada prolongada en troqueladora. Detener línea, retener lote y asignar tarea a Mantenimiento.",
-            "rojo"
-        )
-    elif (8.0 <= humedad <= 10.0) or (10 <= min_detencion < 30):
-        return (
-            "🟡 AMARILLO (Observar sin Detener)",
-            "PRECAUCIÓN: Desviación moderada. NO detener la operación; anotar observación de turno y programar revisión al terminar el formato actual.",
-            "amarillo"
-        )
-    else:
-        return (
-            "🟢 VERDE (Operación Normal)",
-            "OK: Parámetros dentro de estándar (<8% humedad y sin detenciones críticas). Lote autorizado para continuar flujo a frigorífico.",
-            "verde"
-        )
 
 # ==============================================================================
-# 3. BARRA LATERAL (Guía Rápida para el Operador en Planta)
+# 2. REGLAS DE DECISIÓN Y VALIDACIÓN
+# ==============================================================================
+def dato_valido(valor, rango):
+    return valor is not None and rango[0] <= valor <= rango[1]
+
+
+def evaluar_calidad(humedad):
+    if humedad > HUMEDAD_ROJO:
+        return "rojo", "Retenido", "Retener el lote y avisar a Calidad."
+    if humedad >= HUMEDAD_AMARILLO:
+        return (
+            "amarillo",
+            "En observación",
+            "Seguir produciendo. Calidad revisa el lote antes del despacho.",
+        )
+    return "verde", "Liberado", "Lote apto para continuar a despacho."
+
+
+def evaluar_maquina(lecturas, seguidas, minutos):
+    nivel = "verde"
+
+    for variable, valor in lecturas.items():
+        limite_amarillo, limite_rojo = LIMITES_MAQUINA[variable]
+        if valor >= limite_rojo:
+            nivel = "rojo"
+        elif valor >= limite_amarillo and nivel == "verde":
+            nivel = "amarillo"
+
+    confirmada = seguidas >= LECTURAS_CONFIRMACION
+
+    if nivel == "rojo" and confirmada:
+        return (
+            "rojo",
+            PRIORIDAD_ALTA,
+            "Señal crítica confirmada. Validar en terreno y aplicar protocolo seguro.",
+        )
+    if (nivel != "verde" and confirmada) or minutos >= MINUTOS_REVISION:
+        return (
+            "amarillo",
+            PRIORIDAD_MEDIA,
+            "Programar revisión de Mantenimiento en la próxima ventana.",
+        )
+    if nivel != "verde":
+        return "amarillo", None, "Señal sin confirmar. Observar; no crea orden."
+    return "verde", None, "Máquina dentro de rango."
+
+
+def evaluar_registro(humedad, minutos, lecturas, seguidas):
+    nivel_calidad, estado, accion_calidad = evaluar_calidad(humedad)
+    nivel_maquina, prioridad, accion_maquina = evaluar_maquina(
+        lecturas, seguidas, minutos
+    )
+    nivel = max((nivel_calidad, nivel_maquina), key=ORDEN_NIVEL.get)
+
+    return {
+        "nivel": nivel,
+        "estado_lote": estado,
+        "prioridad": prioridad,
+        "decision": f"{accion_calidad} {accion_maquina}",
+    }
+
+
+def revisar_formulario(id_lote, resultado, validacion, nota, causa, origen, minutos):
+    errores = []
+    lote = id_lote.strip().upper()
+
+    if not PATRON_LOTE.fullmatch(lote):
+        errores.append(
+            "Ingresa un código de lote válido: letras, números y guiones, "
+            "entre 6 y 30 caracteres."
+        )
+    if resultado is None:
+        errores.append("Faltan datos válidos de humedad o detención.")
+    if validacion is None:
+        errores.append("Debes seleccionar la validación del turno.")
+    if causa is None:
+        errores.append("Debes seleccionar la causa de detención.")
+    if causa == "Sin detención" and minutos not in (None, 0):
+        errores.append("Si hubo minutos de detención, selecciona una causa.")
+    if resultado and resultado["nivel"] != "verde" and len(nota.strip()) < 15:
+        errores.append("Describe qué ocurrió y qué acción se tomó.")
+    if resultado and resultado["nivel"] == "rojo" and validacion == VALIDACION_OK:
+        errores.append("Una alerta roja no puede cerrarse como parámetro OK.")
+    if origen == "Contingencia manual" and validacion != VALIDACION_MANUAL:
+        errores.append("Marca el registro como contingencia manual.")
+
+    return errores
+
+
+# ==============================================================================
+# 3. BARRA LATERAL
 # ==============================================================================
 with st.sidebar:
     st.markdown("### 🏭 Panel de Control en Piso")
-    st.caption("Estado del Sistema: **🟢 Conectado (SQLite Activo)**")
+    st.caption("Demostrador: los datos pueden reiniciarse si la aplicación se reinicia.")
     st.divider()
-    
-    st.markdown("#### 🚦 Regla Operativa de Turno")
-    st.markdown("""
-    * **🟢 VERDE:** Humedad `< 8%` y Parada `< 10 min` ➔ *Flujo normal.*
-    * **🟡 AMARILLO:** Humedad `8% - 10%` o Parada `10 - 29 min` ➔ *Observar, NO detener máquina.*
-    * **🔴 ROJO:** Humedad `> 10%` o Parada `≥ 30 min` ➔ *Detener línea y llamar a Mantenimiento.*
-    * **⚠️ ERROR:** Dato `< 0%` o `> 35%` ➔ *Activar Contingencia Manual.*
-    """)
+
+    st.markdown("#### 🚦 Regla Operativa")
+    st.markdown(
+        f"""
+**🟢 Verde:** humedad bajo {HUMEDAD_AMARILLO:.0f}% y máquina en rango.
+
+**🟡 Amarillo:** humedad entre {HUMEDAD_AMARILLO:.0f}% y {HUMEDAD_ROJO:.0f}%, señal sin confirmar o parada de {MINUTOS_REVISION} minutos o más. No detener la línea por esta alerta.
+
+**🔴 Rojo:** humedad sobre {HUMEDAD_ROJO:.0f}% o señal crítica confirmada. Validar en terreno y aplicar el protocolo.
+
+**⚠️ Error:** dato fuera de rango. Registrar medición manual.
+"""
+    )
+    st.caption("Umbrales de demostración, sujetos a validación.")
     st.divider()
-    
+
     st.markdown("#### 🛡️ Resguardo del Trabajador")
-    st.info("Ninguna alerta detiene la planta automáticamente ni genera sanciones. Todo evento requiere validación del operador en terreno.")
-    
-    if st.button("🔄 Restaurar Datos de Demostración", use_container_width=True):
-        init_db(force_reset=True)
-        st.toast("Base de datos restaurada con lotes multimarca.", icon="✅")
-        st.rerun()
+    st.info(
+        "Ninguna alerta detiene la planta automáticamente. "
+        "Cada evento se valida en terreno y conserva su contexto."
+    )
 
 # ==============================================================================
-# 4. ENCABEZADO INDUSTRIAL Y RESUMEN OPERATIVO EN VIVO
+# 4. ENCABEZADO Y RESUMEN
 # ==============================================================================
-st.markdown("""
+st.markdown(
+    """
 <div class="main-header">
-    <h1>🏭 Austral Pack Circular SpA — Terminal de Trazabilidad y Planta</h1>
-    <p>Bitácora unificada de Calidad, Producción y Mantenimiento | Control continuo por Lote, Línea y Turno</p>
+    <h1>🏭 AustralPack Circular SpA — Terminal de Trazabilidad y Planta</h1>
+    <p>Bitácora unificada de Calidad, Producción y Mantenimiento | Control por lote, equipo y turno</p>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-conn = sqlite3.connect("organizador_australpack.db")
-df_metricas_lotes = pd.read_sql_query("SELECT * FROM bitacora_lotes", conn)
+conn = conectar()
+df_lotes = pd.read_sql_query("SELECT * FROM bitacora_lotes ORDER BY id", conn)
+df_tareas = pd.read_sql_query("SELECT * FROM tareas_planta ORDER BY id_tarea", conn)
+conn.close()
+
+total_registros = len(df_lotes)
+lotes_unicos = df_lotes["id_lote"].nunique()
+humedades = df_lotes["humedad_pct_sql_query("SELECT * FROM bitacora_lotes", conn)
 df_metricas_tareas = pd.read_sql_query("SELECT * FROM tareas_planta", conn)
 conn.close()
 
